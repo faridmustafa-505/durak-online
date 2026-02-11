@@ -2,32 +2,38 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const { createDeck, dealCards } = require('./gameLogic');
 const { v4: uuidv4 } = require('uuid');
+const path = require('path'); // <--- YENİ: Fayl yollarını tapmaq üçün lazımdır
+const { createDeck, dealCards } = require('./gameLogic');
 
 const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
+
+// Socket.io tənzimləmələri
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: {
+    origin: "*", // İstənilən yerdən qoşulmağa icazə ver
+    methods: ["GET", "POST"]
+  }
 });
 
-let rooms = {}; // Otaqlar: { roomId: { players, deck, trump, field, turnIndex } }
+// --- OYUN MƏNTİQİ (Burada dəyişiklik yoxdur) ---
+let rooms = {};
 
 io.on('connection', (socket) => {
   console.log('İstifadəçi qoşuldu:', socket.id);
 
-  // Otaq yaratmaq
   socket.on('create_room', (playerName) => {
     const roomId = uuidv4().slice(0, 6).toUpperCase();
     rooms[roomId] = {
       id: roomId,
       players: [{ id: socket.id, name: playerName, hand: [], ready: false }],
       deck: [],
-      field: [], // Masadakı kartlar
+      field: [],
       trump: null,
-      status: 'waiting', // waiting, playing
+      status: 'waiting',
       turnIndex: 0
     };
     socket.join(roomId);
@@ -35,7 +41,6 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('update_room', rooms[roomId]);
   });
 
-  // Otağa qoşulmaq
   socket.on('join_room', ({ roomId, playerName }) => {
     if (rooms[roomId] && rooms[roomId].players.length < 6 && rooms[roomId].status === 'waiting') {
       rooms[roomId].players.push({ id: socket.id, name: playerName, hand: [], ready: false });
@@ -46,7 +51,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Hazır olmaq və oyunu başlatmaq
   socket.on('player_ready', (roomId) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -54,11 +58,10 @@ io.on('connection', (socket) => {
     const player = room.players.find(p => p.id === socket.id);
     if (player) player.ready = !player.ready;
 
-    // Hər kəs hazırdırsa başlat
     if (room.players.length >= 2 && room.players.every(p => p.ready)) {
       room.status = 'playing';
       room.deck = createDeck();
-      room.trump = room.deck[room.deck.length - 1]; // Sonuncu kart kozır
+      room.trump = room.deck[room.deck.length - 1];
       dealCards(room.deck, room.players);
       io.to(roomId).emit('game_started', room);
     } else {
@@ -66,36 +69,48 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Kart atmaq (Hücum və ya Müdafiə)
   socket.on('play_card', ({ roomId, card }) => {
     const room = rooms[roomId];
     if (!room) return;
-
-    // Sadələşdirilmiş yoxlama (Real layihədə qaydalar dərinləşməlidir)
     const player = room.players.find(p => p.id === socket.id);
     
-    // Oyunçunun əlindən kartı sil
-    player.hand = player.hand.filter(c => c.id !== card.id);
-    
-    // Masaya əlavə et
-    room.field.push({ card, player: player.name });
-    
-    // Növbəni dəyiş (Sadə məntiq)
-    room.turnIndex = (room.turnIndex + 1) % room.players.length;
+    // Sadə yoxlama: Əgər oyunçuda bu kart varsa
+    const cardIndex = player.hand.findIndex(c => c.id === card.id);
+    if (cardIndex > -1) {
+        player.hand.splice(cardIndex, 1); // Kartı əldən sil
+        room.field.push({ card, player: player.name });
+        room.turnIndex = (room.turnIndex + 1) % room.players.length;
 
-    // Kartlar bitibsə yenidən payla
-    if (room.deck.length > 0 && room.players.some(p => p.hand.length < 6)) {
-        dealCards(room.deck, room.players);
+        if (room.deck.length > 0 && room.players.some(p => p.hand.length < 6)) {
+            dealCards(room.deck, room.players);
+        }
+        io.to(roomId).emit('update_game', room);
     }
-
-    io.to(roomId).emit('update_game', room);
   });
 
   socket.on('disconnect', () => {
-    // Oyunçu çıxanda otağı təmizləmək məntiqi bura yazılmalıdır
+    console.log('İstifadəçi ayrıldı:', socket.id);
+    // Buraya otaqdan silinmə məntiqi əlavə oluna bilər
   });
 });
+// ------------------------------------------------
 
-server.listen(3001, () => {
-  console.log('SERVER QAÇIR: 3001');
+// --- YENİ HİSSƏ: STATIC FAYLLARIN PAYLANMASI ---
+
+// 1. Node.js-ə deyirik ki, "client/dist" qovluğundakı fayllar (CSS, JS, Şəkillər) statikdir.
+// __dirname = server faylının olduğu yer. Biz bir pillə geri çıxıb (../) client/dist-ə giririk.
+const distPath = path.join(__dirname, '../client/dist');
+app.use(express.static(distPath));
+
+// 2. Əgər istifadəçi sadəcə sayta giribsə (məsələn: durak-game.onrender.com),
+// ona index.html faylını göndər.
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
+
+// ------------------------------------------------
+
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
+  console.log(`SERVER ISŞLƏYİR: ${PORT}`);
 });
